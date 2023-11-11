@@ -1,0 +1,197 @@
+import cv2
+import random
+import numpy as np
+from tensorflow.keras import layers, models
+
+
+# create model
+model = models.Sequential()
+model.add(layers.Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same', input_shape=(200, 200, 3)))
+model.add(layers.Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
+model.add(layers.MaxPooling2D((2, 2)))
+model.add(layers.Dropout(0.2))
+model.add(layers.Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
+model.add(layers.Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
+model.add(layers.MaxPooling2D((2, 2)))
+model.add(layers.Dropout(0.2))
+model.add(layers.Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
+model.add(layers.Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
+model.add(layers.MaxPooling2D((2, 2)))
+model.add(layers.Dropout(0.2))
+model.add(layers.Flatten())
+model.add(layers.Dense(128, activation='relu', kernel_initializer='he_uniform'))
+model.add(layers.Dropout(0.2))
+model.add(layers.Dense(10, activation='softmax'))
+model.summary()
+
+filepath = "weights.hdf5"
+model.load_weights(filepath)
+
+
+spriteA = cv2.imread("C:\\Users\\nadee\\Downloads\\pictures\\spriteLeft.png")
+spriteW = cv2.imread("C:\\Users\\nadee\\Downloads\\pictures\\spriteForward.png")
+spriteS = cv2.imread("C:\\Users\\nadee\\Downloads\\pictures\\spriteBackward.png")
+spriteD = cv2.imread("C:\\Users\\nadee\\Downloads\\pictures\\spriteRight.png")
+
+
+#class
+
+class Maze():
+    def __init__(self):
+        self.faceROI = 0
+        self.project = False
+        self.maze0 = cv2.imread("C:\\Users\\nadee\\Downloads\\pictures\\Maze.png")
+        self.maze = cv2.resize(self.maze0, (0, 0), fx=.5, fy=.5)
+    #roi sprite
+    def redraw(self,image,x,y):
+        sprite0 = image
+        sprite = cv2.resize(sprite0, (0, 0), fx=.4, fy=.4)
+        cv2.waitKey(33)
+
+        spriteCopy = sprite.copy()
+        (hgt, wid, _) = sprite.shape
+        colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255),
+                  (255, 255, 0), (255, 0, 255), (0, 255, 255),
+                  (128, 0, 0), (0, 128, 0), (0, 0, 128)]
+
+        # contouring
+        gSprite = cv2.cvtColor(sprite, cv2.COLOR_BGR2GRAY)
+        res, threshed = cv2.threshold(gSprite, 95, 255, cv2.THRESH_BINARY)
+        conts, hier = cv2.findContours(threshed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(spriteCopy, conts, -1, random.choice(colors), 2)
+
+        # ROI
+        maze = self.maze.copy()
+        self.faceROI = maze[y:y + hgt, x:x + wid, :]
+
+        # masking p1
+        mask1 = np.zeros((hgt, wid), sprite.dtype)
+        cv2.drawContours(mask1, conts, -1, 255, -1)
+        mask2 = 255 - mask1
+
+        # masking p2
+        part1 = cv2.bitwise_and(sprite, sprite, mask=mask1)
+        part2 = cv2.bitwise_and(self.faceROI, self.faceROI, mask=mask2)
+
+        # final
+        self.faceROI[:, :, :] = part1 + part2
+        cv2.imshow("Sprite", maze)
+        #cv2.waitKey()
+
+    # #restricting
+    def restrict(self,image,newx,newy):
+        sprite0 = image
+        sprite = cv2.resize(sprite0, (0, 0), fx=.4, fy=.4)
+        cv2.waitKey(33)
+
+        spriteCopy = sprite.copy()
+        (hgt, wid, _) = sprite.shape
+        self.faceROI2 = self.maze[newy:newy + hgt, newx:newx + wid, :]
+
+        print(self.faceROI2.shape)
+        gROI = cv2.cvtColor(self.faceROI2, cv2.COLOR_BGR2GRAY)
+        res, threshed = cv2.threshold(gROI, 10, 255, cv2.THRESH_BINARY_INV)
+        if threshed.sum() > 0:
+            self.project = False
+        else:
+            self.project = True
+        return(self.project)
+
+
+#keyclick
+def keyclick():
+
+    key = cv2.waitKey(33)
+    return key
+
+
+def make_pred(img2):
+   cv2.resize(img2, (200, 200))
+   img3 = img2.reshape((1, 200, 200, 3))
+   frame = np.array(img3) / 255
+   predictions = model.predict(img3)
+   maxIndex = -1
+   maxNum = -1
+   for i in range(4):
+       print(predictions[0, i])
+       if predictions[0, i] > maxNum:
+           maxNum = predictions[0, i]
+           maxIndex = i
+
+   cv2.imshow("img", img2)
+
+   cv2.waitKey()
+
+   if maxIndex == 0:
+       print("A")
+       return "A"
+   elif maxIndex == 1:
+       print("D")
+       return "D"
+   elif maxIndex == 2:
+       print("S")
+       return "S"
+   elif maxIndex == 3:
+       print("W")
+       return "W"
+   else:
+       print("Unable to identify image")
+       return "U"
+
+
+def main():
+    Maze1 = Maze()
+
+    #game start
+
+    startScreen = cv2.imread("C:\\Users\\nadee\\Downloads\\pictures\\accMaze.png")
+    startScreen1 = cv2.resize(startScreen, (0, 0), fx=.5, fy=.5)
+    cv2.imshow("Sprite", startScreen1)
+    cv2.waitKey()
+    currentX = 82
+    currentY = 75
+    Maze1.redraw(spriteW,currentX,currentY)
+    while (True):
+        x = keyclick()
+        if x == ord('a'):
+            Maze1.restrict(spriteA,currentX-5, currentY)
+            if Maze1.project == False:
+                Maze1.redraw(spriteA,currentX,currentY)
+            else:
+                currentX = currentX - 5
+                Maze1.redraw(spriteA,currentX,currentY)
+        elif x == ord('w'):
+            Maze1.restrict(spriteW,currentX, currentY+5)
+            if Maze1.project == False:
+                Maze1.redraw(spriteW, currentX, currentY)
+            else:
+                currentY = currentY + 5
+                Maze1.redraw(spriteW, currentX, currentY)
+        elif x == ord('d'):
+            Maze1.restrict(spriteD,currentX+5, currentY)
+            if Maze1.project == False:
+                Maze1.redraw(spriteD, currentX, currentY)
+            else:
+                currentX = currentX + 5
+                Maze1.redraw(spriteD, currentX, currentY)
+        elif x == ord('s'):
+            Maze1.restrict(spriteA,currentX, currentY-5)
+            if Maze1.project == False:
+                Maze1.redraw(spriteS, currentX, currentY)
+            else:
+                currentY = currentY - 5
+                Maze1.redraw(spriteS, currentX, currentY)
+        elif x == ord(' '):
+            break
+        if (currentY >= 380 and currentY <= 415) and (currentX >= 725 and currentX <= 862):
+            finishScreen = cv2.imread("C:\\Users\\nadee\\Downloads\\pictures\\finishScreen.png")
+            finishScreen1 = cv2.resize(finishScreen, (0, 0), fx=.5, fy=.5)
+            cv2.imshow("Sprite" , finishScreen1)
+        x = cv2.waitKey(33)
+        if x == ord('r'):
+            currentX = 82
+            currentY = 75
+            Maze1.redraw(spriteW, currentX, currentY)
+
+if __name__ == '__main__':
+    main()
