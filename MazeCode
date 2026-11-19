@@ -1,135 +1,88 @@
+"""Measure the sign recognizer's accuracy and latency on a held-out image set.
+
+Expects one folder per class, named after the move it controls:
+
+    test_data/
+        left/     *.jpg|*.png
+        right/
+        back/
+        forward/
+
+Usage:
+    python evaluate.py test_data --weights weights.hdf5
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from pathlib import Path
+
 import cv2
-import random
 import numpy as np
 
-spriteA = cv2.imread("C:\\Users\\nadee\\Downloads\\pictures\\spriteLeft.png")
-spriteW = cv2.imread("C:\\Users\\nadee\\Downloads\\pictures\\spriteForward.png")
-spriteS = cv2.imread("C:\\Users\\nadee\\Downloads\\pictures\\spriteBackward.png")
-spriteD = cv2.imread("C:\\Users\\nadee\\Downloads\\pictures\\spriteRight.png")
+from memory_maze import CLASS_TO_MOVE, SignRecognizer, build_model
+
+MOVE_TO_CLASS = {m: i for i, m in CLASS_TO_MOVE.items()}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
 
 
-#class
+def evaluate(recognizer: SignRecognizer, data_dir: Path) -> dict:
+    n = len(CLASS_TO_MOVE)
+    confusion = np.zeros((n, n), dtype=int)      # rows: true, cols: predicted
+    abstained = np.zeros(n, dtype=int)
+    latencies_ms: list[float] = []
 
-class Maze():
-    def __init__(self):
-        self.faceROI = 0
-        self.project = False
-        self.maze0 = cv2.imread("C:\\Users\\nadee\\Downloads\\pictures\\Maze.png")
-        self.maze = cv2.resize(self.maze0, (0, 0), fx=.5, fy=.5)
-    #roi sprite
-    def redraw(self,image,x,y):
-        sprite0 = image
-        sprite = cv2.resize(sprite0, (0, 0), fx=.4, fy=.4)
-        cv2.waitKey(33)
-
-        spriteCopy = sprite.copy()
-        (hgt, wid, _) = sprite.shape
-        colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255),
-                  (255, 255, 0), (255, 0, 255), (0, 255, 255),
-                  (128, 0, 0), (0, 128, 0), (0, 0, 128)]
-
-        # contouring
-        gSprite = cv2.cvtColor(sprite, cv2.COLOR_BGR2GRAY)
-        res, threshed = cv2.threshold(gSprite, 95, 255, cv2.THRESH_BINARY)
-        conts, hier = cv2.findContours(threshed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(spriteCopy, conts, -1, random.choice(colors), 2)
-
-        # ROI
-        maze = self.maze.copy()
-        self.faceROI = maze[y:y + hgt, x:x + wid, :]
-
-        # masking p1
-        mask1 = np.zeros((hgt, wid), sprite.dtype)
-        cv2.drawContours(mask1, conts, -1, 255, -1)
-        mask2 = 255 - mask1
-
-        # masking p2
-        part1 = cv2.bitwise_and(sprite, sprite, mask=mask1)
-        part2 = cv2.bitwise_and(self.faceROI, self.faceROI, mask=mask2)
-
-        # final
-        self.faceROI[:, :, :] = part1 + part2
-        cv2.imshow("Sprite", maze)
-        #cv2.waitKey()
-
-    # #restricting
-    def restrict(self,image,newx,newy):
-        sprite0 = image
-        sprite = cv2.resize(sprite0, (0, 0), fx=.4, fy=.4)
-        cv2.waitKey(33)
-
-        spriteCopy = sprite.copy()
-        (hgt, wid, _) = sprite.shape
-        self.faceROI2 = self.maze[newy:newy + hgt, newx:newx + wid, :]
-
-        print(self.faceROI2.shape)
-        gROI = cv2.cvtColor(self.faceROI2, cv2.COLOR_BGR2GRAY)
-        res, threshed = cv2.threshold(gROI, 10, 255, cv2.THRESH_BINARY_INV)
-        if threshed.sum() > 0:
-            self.project = False
-        else:
-            self.project = True
-        return(self.project)
-
-
-#keyclick
-def keyclick():
-    key = cv2.waitKey(33)
-    return key
-
-def main():
-    Maze1 = Maze()
-
-    #game start
-
-    startScreen = cv2.imread("C:\\Users\\nadee\\Downloads\\pictures\\accMaze.png")
-    startScreen1 = cv2.resize(startScreen, (0, 0), fx=.5, fy=.5)
-    cv2.imshow("Sprite", startScreen1)
-    cv2.waitKey()
-    currentX = 82
-    currentY = 75
-    Maze1.redraw(spriteW,currentX,currentY)
-    while (True):
-        x = keyclick()
-        if x == ord('a'):
-            Maze1.restrict(spriteA,currentX-5, currentY)
-            if Maze1.project == False:
-                Maze1.redraw(spriteA,currentX,currentY)
+    for move, true_idx in MOVE_TO_CLASS.items():
+        for path in sorted((data_dir / move).glob("*")):
+            if path.suffix.lower() not in IMAGE_EXTS:
+                continue
+            img = cv2.imread(str(path))
+            if img is None:
+                continue
+            t0 = time.perf_counter()
+            pred, _ = recognizer.classify(img)
+            latencies_ms.append((time.perf_counter() - t0) * 1000)
+            if pred is None:
+                abstained[true_idx] += 1
             else:
-                currentX = currentX - 5
-                Maze1.redraw(spriteA,currentX,currentY)
-        elif x == ord('w'):
-            Maze1.restrict(spriteW,currentX, currentY+5)
-            if Maze1.project == False:
-                Maze1.redraw(spriteW, currentX, currentY)
-            else:
-                currentY = currentY + 5
-                Maze1.redraw(spriteW, currentX, currentY)
-        elif x == ord('d'):
-            Maze1.restrict(spriteD,currentX+5, currentY)
-            if Maze1.project == False:
-                Maze1.redraw(spriteD, currentX, currentY)
-            else:
-                currentX = currentX + 5
-                Maze1.redraw(spriteD, currentX, currentY)
-        elif x == ord('s'):
-            Maze1.restrict(spriteA,currentX, currentY-5)
-            if Maze1.project == False:
-                Maze1.redraw(spriteS, currentX, currentY)
-            else:
-                currentY = currentY - 5
-                Maze1.redraw(spriteS, currentX, currentY)
-        elif x == ord(' '):
-            break
-        if (currentY >= 380 and currentY <= 415) and (currentX >= 725 and currentX <= 862):
-            finishScreen = cv2.imread("C:\\Users\\nadee\\Downloads\\pictures\\finishScreen.png")
-            finishScreen1 = cv2.resize(finishScreen, (0, 0), fx=.5, fy=.5)
-            cv2.imshow("Sprite" , finishScreen1)
-        x = cv2.waitKey(33)
-        if x == ord('r'):
-            currentX = 82
-            currentY = 75
-            Maze1.redraw(spriteW, currentX, currentY)
+                confusion[true_idx, MOVE_TO_CLASS[pred]] += 1
 
-if __name__ == '__main__':
+    total = int(confusion.sum() + abstained.sum())
+    answered = int(confusion.sum())
+    correct = int(np.trace(confusion))
+    lat = np.array(latencies_ms[1:] or latencies_ms)  # drop the first call (graph warm-up)
+    return {
+        "images": total,
+        "accuracy_overall": round(correct / total, 4) if total else None,
+        "accuracy_when_answered": round(correct / answered, 4) if answered else None,
+        "abstention_rate": round(int(abstained.sum()) / total, 4) if total else None,
+        "per_class_accuracy": {
+            CLASS_TO_MOVE[i]: round(confusion[i, i] / max(confusion[i].sum() + abstained[i], 1), 4)
+            for i in range(n)
+        },
+        "confusion_matrix": {"labels": [CLASS_TO_MOVE[i] for i in range(n)], "rows_true_cols_pred": confusion.tolist()},
+        "latency_ms": {
+            "mean": round(float(lat.mean()), 2) if lat.size else None,
+            "p95": round(float(np.percentile(lat, 95)), 2) if lat.size else None,
+        },
+        "max_fps_model_only": round(1000 / float(lat.mean()), 1) if lat.size else None,
+    }
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("data_dir", type=Path)
+    p.add_argument("--weights", type=Path, default=Path("weights.hdf5"))
+    p.add_argument("--threshold", type=float, default=0.0,
+                   help="confidence threshold; 0 measures raw accuracy with no abstention")
+    p.add_argument("--rgb", action="store_true")
+    args = p.parse_args()
+
+    recognizer = SignRecognizer(build_model(args.weights), args.threshold, smooth=1, rgb=args.rgb)
+    print(json.dumps(evaluate(recognizer, args.data_dir), indent=2))
+
+
+if __name__ == "__main__":
     main()
