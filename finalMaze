@@ -1,199 +1,281 @@
+"""MemoryMaze: a maze game for memory-retention practice, controlled with ASL hand signs.
+
+A webcam frame is classified by a CNN into one of four movement signs, and the sign
+moves a sprite through the maze. Run with --keyboard to play with W/A/S/D instead.
+
+Usage:
+    python memory_maze.py                      # webcam + model
+    python memory_maze.py --keyboard           # keyboard only, no model needed
+    python memory_maze.py --threshold 0.8 --smooth 7 --camera 1
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from collections import Counter, deque
+from dataclasses import dataclass
+from pathlib import Path
+
 import cv2
-import random
 import numpy as np
-from tensorflow.keras import layers, models
 
-# create model
-model = models.Sequential()
-model.add(layers.Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same', input_shape=(200, 200, 3)))
-model.add(layers.Conv2D(32, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
-model.add(layers.MaxPooling2D((2, 2)))
-model.add(layers.Dropout(0.2))
-model.add(layers.Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
-model.add(layers.Conv2D(64, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
-model.add(layers.MaxPooling2D((2, 2)))
-model.add(layers.Dropout(0.2))
-model.add(layers.Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
-model.add(layers.Conv2D(128, (3, 3), activation='relu', kernel_initializer='he_uniform', padding='same'))
-model.add(layers.MaxPooling2D((2, 2)))
-model.add(layers.Dropout(0.2))
-model.add(layers.Flatten())
-model.add(layers.Dense(128, activation='relu', kernel_initializer='he_uniform'))
-model.add(layers.Dropout(0.2))
-model.add(layers.Dense(10, activation='softmax'))
-model.summary()
+HERE = Path(__file__).resolve().parent
 
-filepath = "weights.hdf5"
-model.load_weights(filepath)
+# Model output index -> move. Matches the class order the model was trained with.
+CLASS_TO_MOVE = {0: "left", 1: "right", 2: "back", 3: "forward"}
+KEY_TO_MOVE = {ord("a"): "left", ord("d"): "right", ord("s"): "back", ord("w"): "forward"}
+
+# (dx, dy) per move, in maze-image pixels (y grows downward).
+MOVE_DELTA = {"left": (-1, 0), "right": (1, 0), "back": (0, -1), "forward": (0, 1)}
+
+START = (82, 75)
+FINISH_X = (725, 862)
+FINISH_Y = (380, 415)
+
+MAZE_SCALE = 0.5
+SPRITE_SCALE = 0.4
+WALL_THRESHOLD = 10      # grayscale value below which a maze pixel counts as wall
+SPRITE_THRESHOLD = 95    # grayscale value above which a sprite pixel is foreground
+INPUT_SIZE = 200
 
 
-spriteA = cv2.imread("spriteLeft.png")
-spriteW = cv2.imread("spriteForward.png")
-spriteS = cv2.imread("spriteBackward.png")
-spriteD = cv2.imread("spriteRight.png")
+# ----------------------------------------------------------------------------
+# Assets
+# ----------------------------------------------------------------------------
+
+def load_image(path: Path, scale: float = 1.0) -> np.ndarray:
+    img = cv2.imread(str(path))
+    if img is None:
+        sys.exit(f"Missing or unreadable asset: {path}")
+    if scale != 1.0:
+        img = cv2.resize(img, (0, 0), fx=scale, fy=scale)
+    return img
 
 
+@dataclass
+class Sprite:
+    image: np.ndarray   # BGR, already scaled
+    mask: np.ndarray    # bool, True where the sprite is drawn
 
-#class
+    @classmethod
+    def load(cls, path: Path) -> "Sprite":
+        img = load_image(path, SPRITE_SCALE)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, threshed = cv2.threshold(gray, SPRITE_THRESHOLD, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(threshed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        mask = np.zeros(gray.shape, np.uint8)
+        cv2.drawContours(mask, contours, -1, 255, thickness=-1)
+        return cls(image=img, mask=mask.astype(bool))
 
-class Maze():
-    def __init__(self):
-        self.faceROI = 0
-        self.project = False
-        self.maze0 = cv2.imread("Maze.png")
-        self.maze = cv2.resize(self.maze0, (0, 0), fx=.5, fy=.5)
-    #roi sprite
-    def redraw(self,image,x,y):
-        sprite0 = image
-        sprite = cv2.resize(sprite0, (0, 0), fx=.4, fy=.4)
-        cv2.waitKey(33)
-
-        spriteCopy = sprite.copy()
-        (hgt, wid, _) = sprite.shape
-        colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255),
-                  (255, 255, 0), (255, 0, 255), (0, 255, 255),
-                  (128, 0, 0), (0, 128, 0), (0, 0, 128)]
-
-        # contouring
-        gSprite = cv2.cvtColor(sprite, cv2.COLOR_BGR2GRAY)
-        res, threshed = cv2.threshold(gSprite, 95, 255, cv2.THRESH_BINARY)
-        conts, hier = cv2.findContours(threshed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(spriteCopy, conts, -1, random.choice(colors), 2)
-
-        # ROI
-        maze = self.maze.copy()
-        self.faceROI = maze[y:y + hgt, x:x + wid, :]
-
-        # masking p1
-        mask1 = np.zeros((hgt, wid), sprite.dtype)
-        cv2.drawContours(mask1, conts, -1, 255, -1)
-        mask2 = 255 - mask1
-
-        # masking p2
-        part1 = cv2.bitwise_and(sprite, sprite, mask=mask1)
-        part2 = cv2.bitwise_and(self.faceROI, self.faceROI, mask=mask2)
-
-        # final
-        self.faceROI[:, :, :] = part1 + part2
-        cv2.imshow("Sprite", maze)
-        #cv2.waitKey()
-
-    # #restricting
-    def restrict(self,image,newx,newy):
-        sprite0 = image
-        sprite = cv2.resize(sprite0, (0, 0), fx=.4, fy=.4)
-        cv2.waitKey(33)
-
-        spriteCopy = sprite.copy()
-        (hgt, wid, _) = sprite.shape
-        self.faceROI2 = self.maze[newy:newy + hgt, newx:newx + wid, :]
-
-        print(self.faceROI2.shape)
-        gROI = cv2.cvtColor(self.faceROI2, cv2.COLOR_BGR2GRAY)
-        res, threshed = cv2.threshold(gROI, 10, 255, cv2.THRESH_BINARY_INV)
-        if threshed.sum() > 0:
-            self.project = False
-        else:
-            self.project = True
-        return(self.project)
+    @property
+    def size(self) -> tuple[int, int]:
+        h, w = self.mask.shape
+        return w, h
 
 
-def main():
-    Maze1 = Maze()
+# ----------------------------------------------------------------------------
+# Game state: collision and rendering
+# ----------------------------------------------------------------------------
 
-    #game start
+class Maze:
+    def __init__(self, maze_img: np.ndarray, sprites: dict[str, Sprite], step: int):
+        self.background = maze_img
+        # Precompute the wall map once instead of re-thresholding on every move.
+        gray = cv2.cvtColor(maze_img, cv2.COLOR_BGR2GRAY)
+        self.walls = gray < WALL_THRESHOLD
+        self.sprites = sprites
+        self.step = step
+        self.reset()
 
-    startScreen = cv2.imread("accMaze.png")
-    startScreen1 = cv2.resize(startScreen, (0, 0), fx=.5, fy=.5)
-    cv2.imshow("Sprite", startScreen1)
-    cv2.waitKey()
-    currentX = 82 # 82, 725
-    currentY = 75 # 75, 200
-    Maze1.redraw(spriteW,currentX,currentY)
+    def reset(self) -> None:
+        self.x, self.y = START
+        self.facing = "forward"
 
-    # read live video and predict
+    def can_occupy(self, x: int, y: int, sprite: Sprite) -> bool:
+        """True if the sprite fits at (x, y) inside the maze without touching a wall."""
+        w, h = sprite.size
+        H, W = self.walls.shape
+        if x < 0 or y < 0 or x + w > W or y + h > H:
+            return False
+        return not self.walls[y:y + h, x:x + w].any()
 
-    cam = cv2.VideoCapture(0)
+    def move(self, direction: str) -> bool:
+        """Turn to face `direction` and step if the path is clear. Returns True if moved."""
+        self.facing = direction
+        dx, dy = MOVE_DELTA[direction]
+        nx, ny = self.x + dx * self.step, self.y + dy * self.step
+        if self.can_occupy(nx, ny, self.sprites[direction]):
+            self.x, self.y = nx, ny
+            return True
+        return False
 
-    y = 7
-    while cam.isOpened():
-        worked, frame = cam.read()
-        if worked:
-            cv2.imshow("frame:", frame)
-            x = make_pred(frame)
-            key = cv2.waitKey(50)
-            if key == ord(' '):  # space
-                cam.release()
-            if x == 'a':
-                Maze1.restrict(spriteA,currentX-y, currentY)
-                if Maze1.project == False:
-                    Maze1.redraw(spriteA,currentX,currentY)
-                else:
-                    currentX = currentX - y
-                    Maze1.redraw(spriteA,currentX,currentY)
-            elif x == 'w':
-                Maze1.restrict(spriteW,currentX, currentY+y)
-                if Maze1.project == False:
-                    Maze1.redraw(spriteW, currentX, currentY)
-                else:
-                    currentY = currentY + y
-                    Maze1.redraw(spriteW, currentX, currentY)
-            elif x == 'd':
-                Maze1.restrict(spriteD,currentX+y, currentY)
-                if Maze1.project == False:
-                    Maze1.redraw(spriteD, currentX, currentY)
-                else:
-                    currentX = currentX + y
-                    Maze1.redraw(spriteD, currentX, currentY)
-            elif x == 's':
-                Maze1.restrict(spriteA,currentX, currentY-y)
-                if Maze1.project == False:
-                    Maze1.redraw(spriteS, currentX, currentY)
-                else:
-                    currentY = currentY - y
-                    Maze1.redraw(spriteS, currentX, currentY)
-            elif x == ord(' '):
+    @property
+    def finished(self) -> bool:
+        return FINISH_X[0] <= self.x <= FINISH_X[1] and FINISH_Y[0] <= self.y <= FINISH_Y[1]
+
+    def render(self) -> np.ndarray:
+        frame = self.background.copy()
+        sprite = self.sprites[self.facing]
+        w, h = sprite.size
+        roi = frame[self.y:self.y + h, self.x:self.x + w]
+        roi[sprite.mask] = sprite.image[sprite.mask]
+        return frame
+
+
+# ----------------------------------------------------------------------------
+# Sign recognition
+# ----------------------------------------------------------------------------
+
+class SignRecognizer:
+    """Wraps the CNN with the preprocessing it expects, a confidence threshold and
+    temporal smoothing, so one noisy frame can't move the player."""
+
+    def __init__(self, model, threshold: float, smooth: int, rgb: bool = False):
+        self.model = model
+        self.threshold = threshold
+        self.history: deque[str | None] = deque(maxlen=smooth)
+        self.rgb = rgb
+
+    def preprocess(self, frame: np.ndarray) -> np.ndarray:
+        img = cv2.resize(frame, (INPUT_SIZE, INPUT_SIZE), interpolation=cv2.INTER_AREA)
+        if self.rgb:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        # Bug fix: the original normalized into `frame` but predicted on the raw pixels.
+        return (img.astype(np.float32) / 255.0)[np.newaxis]
+
+    def classify(self, frame: np.ndarray) -> tuple[str | None, float]:
+        """Single-frame prediction. Returns (move or None, confidence)."""
+        # Calling the model directly avoids model.predict()'s per-call overhead,
+        # which dominates latency for a single frame.
+        probs = np.asarray(self.model(self.preprocess(frame), training=False))[0]
+        movement = probs[: len(CLASS_TO_MOVE)]
+        idx = int(movement.argmax())
+        conf = float(movement[idx])
+        # Abstain when unsure rather than guessing a direction.
+        return (CLASS_TO_MOVE[idx] if conf >= self.threshold else None), conf
+
+    def update(self, frame: np.ndarray) -> tuple[str | None, float]:
+        """Classify, then return a move only when it wins a majority of recent frames."""
+        move, conf = self.classify(frame)
+        self.history.append(move)
+        if len(self.history) < self.history.maxlen:
+            return None, conf
+        winner, votes = Counter(self.history).most_common(1)[0]
+        if winner is not None and votes > len(self.history) // 2:
+            self.history.clear()  # one move per held sign
+            return winner, conf
+        return None, conf
+
+
+def build_model(weights: Path):
+    from tensorflow.keras import layers, models  # imported lazily: not needed for --keyboard
+
+    model = models.Sequential([
+        layers.Input(shape=(INPUT_SIZE, INPUT_SIZE, 3)),
+        layers.Conv2D(32, 3, activation="relu", kernel_initializer="he_uniform", padding="same"),
+        layers.Conv2D(32, 3, activation="relu", kernel_initializer="he_uniform", padding="same"),
+        layers.MaxPooling2D(2),
+        layers.Dropout(0.2),
+        layers.Conv2D(64, 3, activation="relu", kernel_initializer="he_uniform", padding="same"),
+        layers.Conv2D(64, 3, activation="relu", kernel_initializer="he_uniform", padding="same"),
+        layers.MaxPooling2D(2),
+        layers.Dropout(0.2),
+        layers.Conv2D(128, 3, activation="relu", kernel_initializer="he_uniform", padding="same"),
+        layers.Conv2D(128, 3, activation="relu", kernel_initializer="he_uniform", padding="same"),
+        layers.MaxPooling2D(2),
+        layers.Dropout(0.2),
+        layers.Flatten(),
+        layers.Dense(128, activation="relu", kernel_initializer="he_uniform"),
+        layers.Dropout(0.2),
+        layers.Dense(10, activation="softmax"),
+    ])
+    if not weights.exists():
+        sys.exit(f"Model weights not found: {weights}")
+    model.load_weights(str(weights))
+    return model
+
+
+# ----------------------------------------------------------------------------
+# Main loop
+# ----------------------------------------------------------------------------
+
+def draw_hud(frame: np.ndarray, fps: float, move: str | None, conf: float) -> None:
+    label = f"{fps:5.1f} FPS  |  {move or '-'}  ({conf:.2f})"
+    cv2.putText(frame, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+
+def run(args: argparse.Namespace) -> None:
+    assets = Path(args.assets)
+    maze = Maze(
+        load_image(assets / "Maze.png", MAZE_SCALE),
+        {
+            "left": Sprite.load(assets / "spriteLeft.png"),
+            "right": Sprite.load(assets / "spriteRight.png"),
+            "back": Sprite.load(assets / "spriteBackward.png"),  # fix: original checked collisions with spriteLeft
+            "forward": Sprite.load(assets / "spriteForward.png"),
+        },
+        step=args.step,
+    )
+    start_screen = load_image(assets / "accMaze.png", MAZE_SCALE)
+    finish_screen = load_image(assets / "finishScreen.png", MAZE_SCALE)
+
+    cv2.imshow("MemoryMaze", start_screen)
+    cv2.waitKey(0)
+
+    recognizer = cam = None
+    if not args.keyboard:
+        recognizer = SignRecognizer(build_model(Path(args.weights)), args.threshold, args.smooth, args.rgb)
+        cam = cv2.VideoCapture(args.camera)
+        if not cam.isOpened():
+            sys.exit(f"Could not open camera {args.camera}")
+
+    fps, last = 0.0, time.perf_counter()
+    try:
+        while True:
+            move, conf = None, 0.0
+            if cam is not None:
+                ok, frame = cam.read()
+                if not ok:
+                    break
+                move, conf = recognizer.update(frame)
+                now = time.perf_counter()
+                fps = 0.9 * fps + 0.1 * (1.0 / max(now - last, 1e-6))  # smoothed FPS
+                last = now
+                draw_hud(frame, fps, move, conf)
+                cv2.imshow("Camera", frame)
+
+            # One waitKey per loop. The original called waitKey(33) inside every redraw
+            # and collision check, adding ~100 ms of sleep per frame.
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), 27, ord(" ")):  # q, Esc or Space quits
                 break
-        if (currentY >= 380 and currentY <= 415) and (currentX >= 725 and currentX <= 862):
-            finishScreen = cv2.imread("finishScreen.png")
-            finishScreen1 = cv2.resize(finishScreen, (0, 0), fx=.5, fy=.5)
-            cv2.imshow("Sprite" , finishScreen1)
-        x = cv2.waitKey(33)
-        if x == ord('r'):
-            currentX = 82
-            currentY = 75
-            Maze1.redraw(spriteW, currentX, currentY)
+            if key == ord("r"):
+                maze.reset()
+            move = move or KEY_TO_MOVE.get(key)  # keyboard always works as a fallback
 
-def make_pred(img2):
-    img2 = cv2.resize(img2, (200, 200))
-    img3 = img2.reshape((1, 200, 200, 3))
-    frame = np.array(img3) / 255
-    predictions = model.predict(img3)
-
-    maxIndex = -1
-    maxNum = -1
-    for i in range(4):
-        print(predictions[0, i])
-        if predictions[0, i] > maxNum:
-            maxNum = predictions[0, i]
-            maxIndex = i
-
-    if maxIndex == 0:
-        print("A")
-        return "a"
-    elif maxIndex == 1:
-        print("D")
-        return "d"
-    elif maxIndex == 2:
-        print("S")
-        return "s"
-    elif maxIndex == 3:
-        print("W")
-        return "w"
-    # else:
-    #     print("Unable to identify image")
-    #     return "U"
+            if move:
+                maze.move(move)
+            cv2.imshow("MemoryMaze", finish_screen if maze.finished else maze.render())
+    finally:
+        if cam is not None:
+            cam.release()
+        cv2.destroyAllWindows()
 
 
-if __name__ == '__main__':
-    main()
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--assets", default=str(HERE / "assets"), help="folder with the maze and sprite images")
+    p.add_argument("--weights", default=str(HERE / "weights.hdf5"), help="trained model weights")
+    p.add_argument("--camera", type=int, default=0, help="webcam index")
+    p.add_argument("--keyboard", action="store_true", help="play with W/A/S/D, no camera or model")
+    p.add_argument("--threshold", type=float, default=0.7, help="minimum confidence to accept a sign")
+    p.add_argument("--smooth", type=int, default=5, help="frames a sign must win before it counts")
+    p.add_argument("--step", type=int, default=7, help="pixels moved per sign")
+    p.add_argument("--rgb", action="store_true", help="convert frames to RGB if the model was trained on RGB")
+    return p.parse_args(argv)
+
+
+if __name__ == "__main__":
+    run(parse_args())
