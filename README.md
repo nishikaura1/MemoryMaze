@@ -2,7 +2,6 @@
 
 A maze game for memory-retention practice that you play with American Sign Language hand signs instead of a keyboard or touchscreen.
 
-**Demo:** [video link — add after recording]
 
 ## Why
 
